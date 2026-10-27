@@ -73,7 +73,7 @@
 
   function clearErrors(root) {
     root.querySelectorAll('.field-msg').forEach((n) => n.remove());
-    root.querySelectorAll('.field-invalid').forEach((n) => n.classList.remove('field-invalid'));
+    root.querySelectorAll('.field-invalid').forEach((n) => { n.classList.remove('field-invalid'); n.setAttribute('aria-invalid', 'false'); });
   }
   function setError(id, message) {
     const el = $(id);
@@ -153,10 +153,10 @@
       console.warn('[api-bridge] ' + path + ' failed: ' + e.message); return fallback;
     });
     const archivedRes = soft('/products?archived=1', archivedProductData.slice());
-    const [inventory, products, suppliers, movements, users, audit, reasons, categories, salesRes] = await Promise.all([
+    const [inventory, products, suppliers, movements, audit, reasons, categories, salesRes] = await Promise.all([
       soft('/inventory', inventoryCache), soft('/products', productCatalogData.slice()),
       soft('/suppliers', supplierData.slice()), soft('/movements?limit=1000', movementCache),
-      soft('/users', userAccountsData.slice()), soft('/audit', auditLogData.slice()), soft('/reasons', REASONS), soft('/categories', CATEGORIES),
+      soft('/audit', auditLogData.slice()), soft('/reasons', REASONS), soft('/categories', CATEGORIES),
       soft('/sales', { sales: [] })]);
     salesCache = (salesRes && salesRes.sales) || [];
     replace(archivedProductData, Array.isArray(await archivedRes) ? await archivedRes : []);
@@ -183,7 +183,7 @@
     movementCache = movements;
     safe(renderMovementLog);
     safe(renderReports);
-    replace(userAccountsData, users);   // User Management lists staff AND customer accounts (filter by role on the page)
+    if (typeof window.reloadUserAccounts === 'function') await window.reloadUserAccounts(false);
     replace(auditLogData, audit);
 
     const low = inventory.filter((i) => getStockStatus(i) === 'low');
@@ -701,12 +701,18 @@
         : '<div class="sup-empty">In-house production — made by the company, so no supplier is needed.</div>');
   }
 
-  /* ---------- Storage location dropdown (locations already used by products + a starter list; last option adds a new one) ---------- */
+  /* ---------- Storage locations belong to the selected product department ---------- */
   const NEW_LOCATION = '__new_location__';
-  const STARTER_LOCATIONS = ['Warehouse A', 'Warehouse B', 'Warehouse C', 'Storeroom'];
+  const STARTER_LOCATIONS = {
+    'Raw Materials': ['Raw Materials Storage'],
+    'Finishing Supplies': ['Finishing Supplies Storage'],
+    'Finished Goods': ['Finished Goods Storage']
+  };
   function locationList() {
     const seen = new Map();
-    STARTER_LOCATIONS.concat((productCatalogData || []).map((p) => p && p.location)).forEach((l) => {
+    const department = $('npDept').value;
+    (STARTER_LOCATIONS[department] || []).concat((productCatalogData || [])
+      .filter((p) => p && p.department === department).map((p) => p.location)).forEach((l) => {
       l = clean(l); if (l && !seen.has(l.toLowerCase())) seen.set(l.toLowerCase(), l);
     });
     return Array.from(seen.values()).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
@@ -716,7 +722,9 @@
     if (!sel || sel.tagName !== 'SELECT') return;
     sel.innerHTML = '<option value="">Select a location…</option>' +
       locationList().map((l) => '<option value="' + esc(l) + '">' + esc(l) + '</option>').join('') +
-      '<option value="' + NEW_LOCATION + '">+ Add new location…</option>';
+      ($('npDept').value ? '<option value="' + NEW_LOCATION + '">+ Add new location…</option>' : '');
+    sel.disabled = !$('npDept').value;
+    delete sel.dataset.auto;
     setLocationValue(keep);
   }
   function setLocationValue(name) {
@@ -1019,7 +1027,7 @@
     if (!overlay || !form || form.dataset.bridge) return;
     form.dataset.bridge = '1';
     $('npDept').addEventListener('change', () => {
-      fillCategories(); syncCostField(); syncPriceField(); validateField('npListPrice', false); syncSupplierPick(); syncWeightField();
+      fillCategories(); fillLocations(''); validateField('npLocation', false); syncCostField(); syncPriceField(); validateField('npListPrice', false); syncSupplierPick(); syncWeightField();
       const sku = productModalState(); syncUnitField(sku ? productCatalogData.find((p) => p.sku === sku) : null); validateField('npUnit', false);
       applyDeptDefaults(); suggestSku();
     });
@@ -2152,10 +2160,12 @@
     newSupplierForm: 'newSupplierFormError', inviteUserForm: 'inviteUserFormError', editUserForm: 'editUserFormError' };
   const DEPENDS = {                                        // when X changes, re-check these (if already touched)
     movementProduct: ['movementQuantity', 'movementReason'],
-    movementReason: ['movementNote'],
+    movementReason: ['movementNote', 'movementSupplier', 'movementInvoice', 'movementUnitCost'],
     movementDept: ['movementProduct', 'movementReason'],
     npCategory: ['npCategoryNew'],
-    npDept: ['npListPrice'],
+    npDept: ['npListPrice', 'npWeight', 'npCostReason', 'npUnitCost'],
+    npCostOverride: ['npCostReason', 'npUnitCost'],
+    npUnitCost: ['npListPrice'],
     newSupplierPhone: ['newSupplierEmail'],
     newSupplierEmail: ['newSupplierPhone'],
     newSupplierRegion: ['newSupplierProvince', 'newSupplierCity', 'newSupplierBarangay', 'newSupplierZip'],
@@ -2195,7 +2205,19 @@
         if (NOTE_REQUIRED.indexOf($('movementReason').value) >= 0 && v.length < 3) return 'Please explain this entry in the note';
         return '';
       },
+      movementSupplier: () => movementType() === 'in' && $('movementReason').value === 'supplier_receipt' && !$('movementSupplier').value ? 'Choose the supplier this delivery came from' : '',
+      movementInvoice: () => movementType() === 'in' && $('movementReason').value === 'supplier_receipt' ? textRule('movementInvoice', 'Invoice / delivery no.', { required: false, max: 40 })() : '',
+      movementUnitCost: () => {
+        if (movementType() !== 'in' || $('movementReason').value !== 'supplier_receipt') return '';
+        const v = $('movementUnitCost').value.replace(/[,\u20B1\s]/g, '');
+        return !v || (/^\d{1,8}(\.\d{1,2})?$/.test(v) && Number(v) > 0) ? '' : 'Enter the cost per unit in pesos, e.g. 145.50';
+      },
       /* product */
+      npWeight: () => {
+        const v = clean($('npWeight').value);
+        return $('npDept').value !== 'Finished Goods' || !v || (/^\d{1,6}(\.\d{1,3})?$/.test(v) && Number(v) > 0) ? '' : 'Enter the weight of one piece in kg, e.g. 1.25';
+      },
+      npCostReason: () => sellsNow() && costOverridden() && clean($('npCostReason').value).length < 5 ? 'Give a reason for overriding the cost (at least 5 characters)' : '',
       npSku: () => {
         const v = clean($('npSku').value).toUpperCase();
         if (!v) return 'SKU is required';
@@ -2213,7 +2235,7 @@
       npCategory: selectRule('npCategory', 'Choose a category'),
       npCategoryNew: textRule('npCategoryNew', 'Category name', { min: 2, max: 60 }),
       npUnit: selectRule('npUnit', 'Choose a unit'),
-      npUnitCost: numRule('npUnitCost', 'Unit cost', { max: 1e7 }),
+      npUnitCost: () => costAuto() ? '' : numRule('npUnitCost', 'Unit cost', { max: 1e7 })(),
       npOnHand: () => $('npOnHand').readOnly ? '' : numRule('npOnHand', 'On hand', { noLeadingZero: true })(),
       npReorder: () => ($('npReorderManual') && $('npReorderManual').checked ? numRule('npReorder', 'Reorder level', { noLeadingZero: true })() : ''),   // automatic = nothing to type
       npListPrice: () => {
@@ -2299,7 +2321,7 @@
   }
 
   const isActive = (el) => {
-    if (!el || el.disabled) return false;
+    if (!el || el.disabled || el.readOnly || !el.getClientRects().length) return false;
     const grp = el.closest('#movementNoteGroup, #npCategoryNewWrap, #npLocationNewWrap');
     return !(grp && grp.style.display === 'none');
   };
@@ -2310,9 +2332,14 @@
     const group = el.closest('.form-group') || el.parentNode;
     group.querySelectorAll('.field-msg[data-for="' + id + '"]').forEach((n) => n.remove());
     el.classList.toggle('field-invalid', !!message);
+    el.setAttribute('aria-invalid', message ? 'true' : 'false');
     if (message) {
       const m = document.createElement('div');
       m.className = 'field-msg'; m.dataset.for = id; m.textContent = message;
+      m.id = id + 'LiveError'; m.setAttribute('aria-live', 'polite');
+      const descriptions = (el.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean);
+      if (!descriptions.includes(m.id)) descriptions.push(m.id);
+      el.setAttribute('aria-describedby', descriptions.join(' '));
       group.appendChild(m);
     }
   }
@@ -2357,10 +2384,14 @@
         el.addEventListener('blur', check);
       }
     });
+    Object.keys(DEPENDS).filter((id) => !LIVE[id]).forEach((id) => {
+      const el = $(id);
+      if (el) el.addEventListener('change', () => DEPENDS[id].forEach((d) => validateField(d, false)));
+    });
     // switching Stock In <-> Stock Out changes what is valid
     const toggle = $('movementTypeToggle');
     if (toggle) toggle.querySelectorAll('.seg-btn').forEach((b) => b.addEventListener('click', () => {
-      setTimeout(() => { ['movementReason', 'movementQuantity'].forEach((i) => validateField(i, false)); }, 0);
+      setTimeout(() => { ['movementReason', 'movementQuantity', 'movementNote', 'movementSupplier', 'movementInvoice', 'movementUnitCost'].forEach((i) => validateField(i, false)); }, 0);
     }));
 
     Object.keys(FORM_BANNERS).forEach((formId) => {

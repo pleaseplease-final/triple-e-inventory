@@ -532,7 +532,7 @@
           if (!window.confirm('Approve return ' + r.returnNo + ' for ' + no + '?\n\n' + items + '\n\nRefund: ' + peso(r.amount) + '\n' + how + '\n\nCashier\'s reason: ' + r.reason)) { b.disabled = false; return; }
           body.restock = window.confirm('Are the returned items in resellable condition?\n\nOK = put them back in stock\nCancel = refund only, do NOT add them back to stock (damaged goods)');
         } else {
-          const why = window.prompt('Why is return ' + r.returnNo + ' rejected? The cashier will see this. (5–200 characters)');
+          const why = await FormAssist.askReason({title:'Reject return ' + r.returnNo, label:'Why is this return rejected? The cashier will see this.', min:5, max:200, confirm:'Reject return'});
           if (why === null) { b.disabled = false; return; }
           body.note = why.trim();
         }
@@ -548,7 +548,8 @@
         await api('/pos/void-requests/' + encodeURIComponent(v.id) + '/decision', { method: 'POST', body: JSON.stringify({ approve: ok }) });
         toast(ok ? no + ' was voided and the stock returned.' : 'Void request for ' + no + ' rejected.');
       } else {
-        await api('/orders/' + encodeURIComponent(b.dataset.soCancel) + '/cancel-decision', { method: 'POST', body: JSON.stringify({ approve: b.dataset.ok === '1' }) });
+        if (b.dataset.ok === '1') { if (!await window.PaymentSafeguards.cancel(b.dataset.soCancel, true)) return; }
+        else await api('/orders/' + encodeURIComponent(b.dataset.soCancel) + '/cancel-decision', { method: 'POST', body: JSON.stringify({ approve: false }) });
         toast(b.dataset.ok === '1' ? 'Cancellation approved. Stock restored.' : 'Cancellation rejected.');
       }
       await load();
